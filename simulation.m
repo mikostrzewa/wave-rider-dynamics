@@ -1,44 +1,55 @@
-% Specify the path to your CSV files
-cd_regression_coefficients = 'C_d_regression_coefficients.csv';
-cl_regression_coefficients = 'C_l_regression_coefficients.csv';
+% Clear history
+clear;
+clc;
+
+% Set LaTeX as Interpreter for text labels
+list_factory = fieldnames(get(groot,'factory'));
+index_interpreter = find(contains(list_factory,'Interpreter'));
+for i = 1:length(index_interpreter)
+    default_name = strrep(list_factory{index_interpreter(i)},'factory','default');
+    set(groot, default_name,'latex');
+end
+
+% Trial Directories
+trial_dirs = [
+    './trial1/';
+    './trial2/';
+    './trial3/';
+    './trial4/';
+];
+trial_num = 1;
 
 % Read the CSV files into tables
-cd_coeffTable = readtable(cd_regression_coefficients);
-cl_coeffTable = readtable(cl_regression_coefficients);
+cd_coeffTable = readtable([trial_dirs(trial_num, :) 'C_d_Regression.csv']);
+cl_coeffTable = readtable([trial_dirs(trial_num, :) 'C_l_Regression.csv']);
 
 % Create symbolic variables for Mach and AoA
 syms Mach AoA
 
-% Generate symbolic polynomial for C_d
+% Generate symbolic polynomial for C_d, C_l, and C_l/C_d
 cd_poly = construct_symbolic_poly(cd_coeffTable, Mach, AoA);
-fprintf('Symbolic Polynomial for C_d:\n');
-disp(cd_poly);
-
-% Generate symbolic polynomial for C_l
 cl_poly = construct_symbolic_poly(cl_coeffTable, Mach, AoA);
-fprintf('Symbolic Polynomial for C_l:\n');
-disp(cl_poly);
+cl_cd_poly = cl_poly/cd_poly;
 
-% Define new input data (Mach, AoA)
-new_data = [0.8, 5.0]; % Example: Mach 0.8, AoA 5 degrees
+% Generate C_l/C_d for all AoA
+aoa_linsp = linspace(0, 15, 31);
+cl_cd_mach_poly = subs(cl_cd_poly, AoA, aoa_linsp);
 
-% Calculate values of the polynomials at given inputs
-predicted_cd = double(subs(cd_poly, {Mach, AoA}, new_data));
-predicted_cl = double(subs(cl_poly, {Mach, AoA}, new_data));
-
-% This is the simulation file for the 2D projectile motion simulation
-
-aoa_min = 0; 
-aoa_max = 15;
-
+% Intial Conditions
 M = 10; % Initial mach number
 m = 25; %25 kg
 y = 40000;
 x = 0;
+aoa = 0;
 [T, a, P, rho] = atmosisa(y, 'extended', true);
 
 A = 2; % Surface area
-back_area = 0.028; %m^2
+back_areas = [
+    0.028;
+    0.030;
+    0.030;
+    0.0298;
+]; %m^2
 
 vx = M*a;
 vy = 0;
@@ -46,81 +57,59 @@ vy = 0;
 g = 9.81;
 dt = 1;
 
-figure;
+trajectory_plot = figure;
 hold on;
 xlabel('X Position');
+
+yyaxis left; % put trajectory on left
+traj_plt = plot(NaN, NaN, 'b-'); % Empty plot for trajectory
 ylabel('Y Position');
+ylim([0 4.5e4]);
+
+yyaxis right; % put mach on right
+mach_plt = plot(NaN, NaN, 'r-'); % Empty plot for mach number
+ylabel('Mach Number');
+ylim([0 11]);
+
 title('Waverider Trajectory Simulation');
 plotHandle = plot(x, y, 'bo');
+
+% initial simulation state
 trajectoryX = x;
 trajectoryY = y;
-
-% Initialize the plot handle outside the loop
-h = plot(NaN, NaN, 'b-'); % Create an empty plot
+M_history = M;
+aoa_history = aoa;
 
 last_saved_x = x;
-min_v = -100;
-maax_v = 40;
 
-trigger = false;
-
-aoa = 0;
-
-lift_threshold = 20;
-
-% Initialize arrays to store AoA and Mach during simulation
-aoa_history = [];
-M_history = [];
+% cutoff height for when mach number is low enough that shock is weak and it is time to glide
+glide_cutoff = 2.5e4;
 
 while y > 0
-    [T, a, P, rho] = atmosisa(y, 'extended', true);
+
+    if y > glide_cutoff
+        [T, a, P, rho] = atmosisa(y, 'extended', true);
+    else
+        [T, a, P, rho] = atmosisa(glide_cutoff, 'extended', true);
+    end
 
     v = sqrt(vx^2 + vy^2);
     M = v/a;
 
-    L = @(aoa) double(subs(cl_poly, {Mach, AoA}, [M, aoa]));
-    D = @(aoa) double(subs(cd_poly, {Mach, AoA}, [M, aoa]));
-
-    if vy < min_v && vy > min_v*1.2
-        trigger = true;
-    end
-    
-    if vy > maax_v
-        trigger = false;
-    end
-
-    L_min = m*g+lift_threshold;
-
-    if trigger
-        % Define the objective function (maximize L/D, so minimize -L/D)
-        obj_fun = @(aoa) -L(aoa) / D(aoa);
-
-        % Define the nonlinear constraint
-        % Ensure L(aoa) >= L_min
-        nonlcon = @(aoa) deal([], L(aoa) - L_min); % No equality constraint, inequality only
-
-        % Initial guess for aoa
-        aoa0 = (aoa_min + aoa_max) / 2; 
-
-        % Set options for fmincon
-        options = optimoptions('fmincon', 'Display', 'iter', 'Algorithm', 'sqp'); 
-
-        % Call fmincon to optimize
-        [aoa, fval] = fmincon(obj_fun, aoa0, [], [], [], [], aoa_min, aoa_max, nonlcon, options);
+    if x == 0 || y < glide_cutoff
+        aoa = 0;
+        L = double(subs(cl_poly, [Mach AoA], [M aoa])*rho);
+        D = double(subs(cd_poly, [Mach AoA], [M aoa])*rho)+P/M*back_areas(trial_num);
+        cl_cd = L/D;
     else
-        obj_fun = @(aoa) -(L(aoa) / D(aoa));
-        [aoa, fval] = fminbnd(obj_fun, aoa_min, aoa_max);
+        [aoa, L, D, cl_cd] = getMaxCLCD(aoa_linsp, cl_cd_mach_poly, cl_poly, cd_poly, Mach, AoA, M, rho, P, back_areas(trial_num));
     end
 
-    % Recompute L and D with the chosen AoA
-    L_val = double(subs(cl_poly, {Mach, AoA}, [M, aoa]));
-    D_val = double(subs(cd_poly, {Mach, AoA}, [M, aoa]));
+    Lx = -L * vy / v;
+    Ly = L * vx / v;
 
-    Lx = -L_val * vy / v;
-    Ly = L_val * vx / v;
-
-    Dx = - D_val * vx/v;
-    Dy = - D_val * vy/v;
+    Dx = - D * vx/v;
+    Dy = - D * vy/v;
 
     Fx = Dx+Lx;
     Fy = Ly + Dy -m*g;
@@ -135,36 +124,39 @@ while y > 0
     aoa_history = [aoa_history, aoa];
     M_history = [M_history, M];
 
+    trajectoryX = [trajectoryX, x];
+    trajectoryY = [trajectoryY, y];
+    last_saved_x = x;
+    
+    % Update the plot data
+    set(traj_plt, 'XData', trajectoryX, 'YData', trajectoryY);
+    set(mach_plt, 'XData', trajectoryX, 'YData', M_history);
+    drawnow;
+
     if abs(x - last_saved_x) > 1000
-        trajectoryX = [trajectoryX, x];
-        trajectoryY = [trajectoryY, y];
-        last_saved_x = x;
-
         % Print information
-        fprintf('Optimal AoA: %.2f degrees\n', aoa);
+        fprintf('AoA: %.2f degrees\n', aoa);
         fprintf('Mach Number: %.2f\n', M);
-        fprintf('Lift: %.4f\n', L_val);
-        fprintf('Drag: %.4f\n', D_val);
-        fprintf('Lift (L): %.2f N\n', L_val);
-        fprintf('Drag (D): %.2f N\n', D_val);
-        fprintf('Lx: %.2f N, Ly: %.2f N\n', Lx, Ly);
-        fprintf('Air Density (rho): %.5f kg/m^3\n', rho);
+        fprintf('Lift: %.4f\n', L);
+        fprintf('Drag: %.4f\n', D);
+        fprintf('$\frac{C_L}{C_D}$: %.4f\n', cl_cd);
+        fprintf('$L_x$: %.2f N, $L_y$: %.2f N\n', Lx, Ly);
+        fprintf('Air Density ($\rho$): %.5f kg/m^3\n', rho);
         fprintf('Velocity (v): %.2f m/s\n', v);
-        fprintf('Fx: %.2f N, Fy: %.2f N\n', Fx, Fy);
-        fprintf('vx: %.2f m/s, vy: %.2f m/s\n', vx, vy);
-        fprintf('Trigger: %d\n', trigger);
+        fprintf('$F_x$: %.2f N, $F_y$: %.2f N\n', Fx, Fy);
+        fprintf('$v_x$: %.2f m/s, $v_y$: %.2f m/s\n', vx, vy);
         fprintf('----------------------------------------\n');
-
-        % Update the plot data
-        set(h, 'XData', trajectoryX, 'YData', trajectoryY);
-        drawnow;
     end
 end
 
 fprintf('Final X Position: %.2f kilometers\n', x/1000);
+set(mach_plt, 'XData', trajectoryX, 'YData', M_history);
+drawnow;
 
+saveas(trajectory_plot, [trial_dirs(trial_num, :) 'trajectory.png']);
 hold off;
 
+%{
 % After the simulation, plot the distributions of AoA and Mach
 figure;
 histogram(aoa_history);
@@ -177,6 +169,7 @@ histogram(M_history);
 xlabel('Mach Number');
 ylabel('Frequency');
 title('Distribution of Mach Number During Flight');
+%}
 
 function poly = construct_symbolic_poly(coeffTable, Mach, AoA)
     % Initialize the polynomial
@@ -217,4 +210,12 @@ function poly = construct_symbolic_poly(coeffTable, Mach, AoA)
         % Add the term to the polynomial
         poly = poly + term;
     end
+end
+
+function [aoa, L, D, cl_cd] = getMaxCLCD(aoa_linsp, cl_cd_mach_poly, cl_poly, cd_poly, Mach, AoA, M, rho, P, back_area)
+    [cl_cd, i] = max(subs(cl_cd_mach_poly, Mach, M));
+    cl_cd = double(cl_cd);
+    aoa = aoa_linsp(i);
+    L = double(subs(cl_poly, [Mach AoA], [M aoa])*rho);
+    D = double(subs(cd_poly, [Mach AoA], [M aoa])*rho)+P/M*back_area;
 end
